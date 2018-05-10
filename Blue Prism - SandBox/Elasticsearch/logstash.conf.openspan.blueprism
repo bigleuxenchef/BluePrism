@@ -1,0 +1,147 @@
+
+input {
+file {
+    path => [ "C:\Users\rumi\AppData\Roaming\OpenSpan\CRM_E_CRMfrmLogin_Created.log" ]
+    type => "openspan.logincreate"
+  }
+file {
+    path => [ "C:\Users\rumi\AppData\Roaming\OpenSpan\RuntimeLog.txt" ]
+    type => "openspan.runtimelog"
+# will force to restart parsing the file all over again. Interesting fearture either for recovery or testing
+	start_position => "beginning"
+  }
+
+
+   jdbc {
+    jdbc_driver_library => "${JDBC_DRIVER_LIBRARY}"
+    jdbc_driver_class => "${JDBC_DRIVER_CLASS}"
+    jdbc_connection_string => "jdbc:sqlserver://${SQLSERVERHOSTNAME}:${SQLSERVERPORT};instance=${SQLSERVERINSTANCE};databaseName=${BLUEPRISMDB};integratedSecurity=true;useTicketCache=true;doNotPrompt=true;"
+	#clean_run => true
+	last_run_metadata_path => "${LOGSTASH_HOME}\.logstash_jdbc_last_run"
+	jdbc_user => "${JDBC_USER}"
+	#jdbc_password => "*******"
+      	schedule => "0 0-59 0-23 * * *"
+	tracking_column => "processenddatetime"
+	tracking_column_type => "timestamp"
+jdbc_default_timezone => "America/Toronto"
+statement => "select L.*, S.starterresourcename,S.starterusername,S.runningresourcename, S.runningosusername,S.startdatetime as 'processstartdatetime',S.enddatetime as 'processenddatetime',S.processname as 'processprocessname',
+ datediff(ms, L.startdatetime,L.enddatetime)/1000.0 as 'duration',datediff(ms, S.startdatetime,S.enddatetime)/1000.0 as 'processduration' 
+ from BPASessionLog_NonUnicode L join BPVSessioninfo S on S.sessionnumber = L.sessionnumber
+where S.enddatetime > :sql_last_value and S.enddatetime is not null"
+ 
+	jdbc_paging_enabled => "true"
+    jdbc_page_size => "50000"
+    type => "blueprism.process.completed"
+  }
+ jdbc {
+    jdbc_driver_library => "${JDBC_DRIVER_LIBRARY}"
+    jdbc_driver_class => "${JDBC_DRIVER_CLASS}"
+    jdbc_connection_string => "jdbc:sqlserver://${SQLSERVERHOSTNAME}:${SQLSERVERPORT};instance=${SQLSERVERINSTANCE};databaseName=BluePrismTraining;integratedSecurity=true;useTicketCache=true;doNotPrompt=true;"
+	#clean_run => true
+	last_run_metadata_path => "${LOGSTASH_HOME}\.logstash_jdbc_last_run.running"
+	jdbc_user => "${JDBC_USER}"
+	#jdbc_password => "*******"
+      	schedule => "0 0-59 0-23 * * *"
+	tracking_column => "startdatetime"
+	tracking_column_type => "timestamp"
+jdbc_default_timezone => "America/Toronto"
+statement => "select L.*, S.starterresourcename,S.starterusername,S.runningresourcename, S.runningosusername,S.startdatetime as 'processstartdatetime',S.enddatetime as 'processenddatetime',S.processname as 'processprocessname',
+ datediff(ms, L.startdatetime,L.enddatetime)/1000.0 as 'duration',datediff(ms, S.startdatetime,S.enddatetime)/1000.0 as 'processduration' 
+ from BPASessionLog_NonUnicode L join BPVSessioninfo S on S.sessionnumber = L.sessionnumber
+where  L.startdatetime > :sql_last_value and  S.enddatetime is null"
+ 
+	jdbc_paging_enabled => "true"
+    jdbc_page_size => "50000"
+    type => "blueprism.process.running"
+  }
+  
+
+}
+filter {
+
+# OpenSpam filtering to cover :
+# - mapping logs from CSV format ('|' instead of ',')
+# - fixing timestamp issue (in the runtimelog, timestamp do not carry any date, only the time
+#   date is defined in the header part of the file after "Created Date:"
+# - compute elasped time to execute any component, for that we use Logstash elapsed plug-in
+# - extract field Stage (Start/End) as well as sessionId
+
+if [type] =~ /openspan.runtimelog/
+{
+
+csv{
+separator => "|"
+    columns => ["MsgType","TimeStamp","Thread","State","Category","DesignComponent","Component","Message"]
+}
+grok {
+    match => ["Component","(?<ComponentName>(.*?))[-]+(?<ComponentIndex>[0-9]+[ ]*$)"]
+    match => ["MsgType", "[Created date: ]+(?<runinglog.createdate>%{DATE_US})"]
+
+}
+    if [runinglog.createdate]
+       {
+ruby
+{
+			init => "time = Time.new; @@credate = time.strftime('%m/%d/%Y') "
+			code => "@@credate = event.get('[runinglog.createdate]')"
+}
+  
+}
+ruby
+{
+code => "event.set('TimeStamp', event.get('TimeStamp') + @@credate)"
+}
+
+date {
+# 08:37:54.359 PM 10/15/2017
+     match => ["TimeStamp"," hh:mm:ss.SSS aa MM/dd/YYYY"]
+ }
+grok {
+ match => ["Message","[ ]*(?<Stage>(.*?))\^[SessionId]+\=(?<SessionId>[A-Za-z0-9\-]*)\;"]
+add_tag => "%{Stage}"
+}
+
+
+elapsed {
+    start_tag => "Start"
+    end_tag => "End"
+    unique_id_field => "SessionId"
+    id => "Elapsed"
+  }
+
+}
+
+}
+output {
+if [type] =~ /blueprism/
+{
+    elasticsearch { 
+	hosts => "http://${ELKMASTERHOSTNAME}:${ELKMASTERPORT}"
+	index => "%{type}-%{+YYYY.MM.dd}"
+	document_id => "%{sessionnumber}-%{seqnum}"
+	doc_as_upsert => "true"
+    }
+}
+if [type] =~ /openspan/
+{    elasticsearch { 
+	hosts => "http://${ELKMASTERHOSTNAME}:${ELKMASTERPORT}"
+	index => "%{type}-%{+YYYY.MM.dd}"
+    }
+}
+# delete processes that have been completed from the "blueprism.running" pipeline
+if [type] == "blueprism.process.completed"
+{
+ elasticsearch { 
+	action => "delete"
+	hosts => "http://${ELKMASTERHOSTNAME}:${ELKMASTERPORT}"
+	index => "blueprism.process.running-%{+YYYY.MM.dd}"
+	document_type => "blueprism.process.running"
+	document_id => "%{sessionnumber}-%{seqnum}"
+    }
+}
+
+# display to the console any of the output stream, this can be commented for performance reason
+	
+  stdout { codec => rubydebug }
+}
+
