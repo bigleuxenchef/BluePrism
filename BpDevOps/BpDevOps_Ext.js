@@ -10,6 +10,7 @@
 const log4js = require('log4js')
 const sql = require('mssql')
 const formatxml = require('xml-formatter')
+const fs = require('fs')
 
 log4js.configure({
     appenders: { console: { type: 'console' }, BpDevOps_Ext: { type: 'file', filename: 'BpDevOps_Ext.log' } },
@@ -17,18 +18,20 @@ log4js.configure({
 });
 var logger = log4js.getLogger('BpDevOps_Ext');
 var mycommand = null //global variable containing the command to execute
-var fs = require('fs')
 var myoutput = (result => console.log(result))
 var myrender = (result => { myoutput(JSON.stringify(result, null, 4)) }) //global variable containing the way to render the output
 var filterpart = ''
 var builtquery = ''
-logger.level = 'info'
 
 // Process Command line parameter
 
 var argv = ProcessCommandlineParameters(require('yargs'));
-if (!mycommand) return;
-if (argv.File != null)
+logger.level = argv.loglevel
+
+
+if (!mycommand) return // if no command submitted just quick
+
+if (argv.File != null) // it the output is set to file, change the output function from console to file
     myoutput = (result => fs.appendFileSync(argv.File, result + "\n"))
 
 logger.info("Argv", argv)
@@ -62,42 +65,41 @@ function GetPackageList(sql) {
 
     return sql.query`select * from BPAPackage`
 }
-function RenderGetPackageListxml(result)
-{
+function RenderGetPackageListxml(result) {
     //TO DO
 }
 
-function RenderGetPackageListraw(result)
-{ var temp = '';
-    for (i in result.recordset) {
-        temp += result.recordset[i].name + '\n';
-    } 
-    return temp;
+function RenderGetPackageListraw(result) {
+    return result.recordset.reduce(function (temp, tuple) {
+        return temp + tuple.name + '\n'
+    }, '')
 }
 
 
 
 function GetProcessList(sql) {
 
+
+    // snippet taken from https://social.msdn.microsoft.com/Forums/sqlserver/en-US/0c8e0c50-a695-4c7f-b032-7014c225ad11/passing-datepart-variable-to-dateadd?forum=transactsql
     return (!argv.A ? sql.query`select name from BPAProcess;` :
         sql.query`
            Declare @DatePart varchar(5), @UnitsToAdd int
-           set @DatePart = ${argv.regex[2]}
-           set @UnitsToAdd = ${argv.regex[1]}
+           set @DatePart = ${argv.regex.groups.datepart}
+           set @UnitsToAdd = ${argv.regex.groups.number}
            declare @cmd nvarchar(255), @Parms nvarchar(255), @dt datetime
            set @Parms = '@Units int, @dtOutput datetime OUTPUT'
            set @cmd = 'set @dtOutput = Dateadd(' + @DatePart + ',@Units, GetDate())'
            exec sp_ExecuteSQL @cmd, @parms,@Units = @UnitsToAdd, @dtOutput = @dt OUTPUT
            select distinct name from BPAProcess P join  BPAAuditEvents A on P.processid=A.gTgtProcID 
            where dateadd(hh,-4,eventdatetime) > @dt`);
+    // dateadd(hh,-4,eventdatetime) here the eventdatetime have been produced and render in Zulu time
 }
 
 function RenderGetProcessListraw(result) {
-    var temp = ''    
-    for (i in result.recordset) 
-        temp += result.recordset[i].name +'\n'
-    return temp;
-    }
+    return result.recordset.reduce(function (temp, tuple) {
+        return temp + tuple.name + '\n'
+    }, '')
+}
 
 function GetProcessInPackage(sql, argv) {
 
@@ -112,11 +114,11 @@ function RenderGetProcessInPackagexml(result) {
     // TO DO
 }
 
+
 function RenderGetProcessInPackageraw(result) {
-var temp = ''    
-for (i in result.recordset) 
-    temp += result.recordset[i].packagename + ";" + result.recordset[i].processname+'\n'
-return temp;
+    return result.recordset.reduce(function (temp, tuple) {
+        return temp + tuple.packagename + ";" + tuple.processname + '\n'
+    }, '')
 }
 
 
@@ -146,20 +148,14 @@ function GetProcessDetails(sql, argv) {
 
     return result;
 }
-
 function RenderGetProcessDetailsxml(result) {
-    var temp = "";
+    return result.recordsets[0].reduce(function (temp, tuple) {
+        var objectorprocess = tuple.ProcessType == "O" ? "object" : "process";
+        return temp + `
+            <${objectorprocess} id="${tuple.processid}" name="${tuple.name}" published="true" xmlns="http://www.blueprism.co.uk/product/process">${tuple.processxml}</${objectorprocess}>`
+    }, '')
 
-    for (i in result.recordsets[0]) {
-        var objectorprocess = result.recordsets[0][i].ProcessType == "O" ? "object" : "process";
-        temp += `
-        <${objectorprocess} id="${result.recordsets[0][i].processid}" name="${result.recordsets[0][i].name}" published="true" xmlns="http://www.blueprism.co.uk/product/process">${result.recordsets[0][i].processxml}</${objectorprocess}>`
-
-    }
-
-    return temp;
 }
-
 
 function GetReleaseDetails(sql, argv) {
     return sql.query
@@ -192,21 +188,20 @@ function GetReleaseDetails(sql, argv) {
         `
 }
 
+
 function RenderGetEnvironmentVarDetailsxml(result) {
 
-    var temp = "";
 
-    for (i in result.recordsets[0]) {
-        temp += `
-        <environment-variable id="${result.recordsets[0][i].name}" name="${result.recordsets[0][i].name}" type="${result.recordsets[0][i].datatype}" value="${result.recordsets[0][i].value}" xmlns="http://www.blueprism.co.uk/product/environment-variable">
-            <description>${result.recordsets[0][i].description}</description>
-        </environment-variable>`
-
-    }
-
-    return temp;
+    return result.recordsets[0].reduce(function (temp, tuple) {
+        return temp +
+            `
+    <environment-variable id="${tuple.name}" name="${tuple.name}" type="${tuple.datatype}" value="${tuple.value}" xmlns="http://www.blueprism.co.uk/product/environment-variable">
+        <description>${tuple.description}</description>
+    </environment-variable>`
+    }, '')
 }
-function RenderGetReleaseDetailsraw(result){}
+
+function RenderGetReleaseDetailsraw(result) { }
 
 function RenderGetGroupDetailsxml(result) {
 
@@ -233,7 +228,8 @@ function RenderGetGroupDetailsxml(result) {
 
 
     }
-    temp += `
+    if (result.recordsets[0].length > 0) // if the recordset is empty don't print anything
+        temp += `
             </members>  
         </${result.recordsets[0][i].typekey}>`
 
@@ -309,6 +305,10 @@ function ProcessCommandlineParameters(argv) {
             alias: 'F',
             describe: 'output file',
             default: null
+        }).option('loglevel', {
+            alias: 'l',
+            describe: 'Log4js Level OFF|FATAL|ERROR|WARN|INFO|DEBUG|TRACE|ALL',
+            default: 'info'
         })
         .command('GetProcessXml', '-n|--name <process name> : Provide the process in xml format', function (yargs) {
             return yargs.option('n', {
@@ -334,7 +334,7 @@ function ProcessCommandlineParameters(argv) {
             })
         },
             StandardBuilder)
-        .command('GetPackageList', 'Provide the list of blueprism packages',{},
+        .command('GetPackageList', 'Provide the list of blueprism packages', {},
             StandardBuilder)
         .command('GetProcessList', '-A | -audit <number><date part> Provide the list of blueprism processes', function (yargs) {
             return yargs.option('A', {
@@ -344,7 +344,7 @@ function ProcessCommandlineParameters(argv) {
             }).example("GetProcessList", "./BpDevOps_Ext.js GetProcessList -A -90mi\n./BpDevOps_Ext.js GetProcessList -f raw -A -90mi -F output.txt")
         },
             function (argv) {
-                var regex1 = RegExp('(?<number>-?[0-9]+)(?<datepart>(DD|mi){1})$');
+                var regex1 = RegExp('(?<number>-?[0-9]+)(?<datepart>(yy|qq|mm|dy|wk|dw|dd|hh|mi){1})$');
                 logger.info(`validation ${argv.A} against regex ${regex1.test(argv.A)}`);
                 logger.info(`exec ${argv.A} against regex ${JSON.stringify(regex1.exec(argv.A), null, 4)}`);
                 if (regex1.test(argv.A)) argv.regex = regex1.exec(argv.A);
@@ -356,7 +356,7 @@ function ProcessCommandlineParameters(argv) {
                 describe: 'Provide the package name'
             })
         },
-        StandardBuilder)
+            StandardBuilder)
         .exitProcess(true)
         .argv;
 }
@@ -366,5 +366,5 @@ function ProcessCommandlineParameters(argv) {
 function StandardBuilder(argv) {
     mycommand = ((sql) => eval(argv._[0])(sql, argv));
     if (RegExp('^(xml|raw)$').test(argv.format))
-            myrender = (result => myoutput(eval('Render' + argv._ + argv.format)(result)));
+        myrender = (result => myoutput(eval('Render' + argv._ + argv.format)(result)));
 }
