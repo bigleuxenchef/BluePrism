@@ -81,46 +81,63 @@ function GetProcessList(sql) {
 
 
     // snippet taken from https://social.msdn.microsoft.com/Forums/sqlserver/en-US/0c8e0c50-a695-4c7f-b032-7014c225ad11/passing-datepart-variable-to-dateadd?forum=transactsql
-    return (!argv.A ? sql.query`select name from BPAProcess;` :
+    return (!argv.A ? sql.query`select * from BPAProcess;` :
         sql.query`
            Declare @DatePart varchar(5), @UnitsToAdd int
            set @DatePart = ${argv.regex.groups.datepart}
            set @UnitsToAdd = ${argv.regex.groups.number}
            declare @cmd nvarchar(255), @Parms nvarchar(255), @dt datetime
            set @Parms = '@Units int, @dtOutput datetime OUTPUT'
-           set @cmd = 'set @dtOutput = Dateadd(' + @DatePart + ',@Units, GetDate())'
+           set @cmd = 'set @dtOutput = Dateadd(' + @DatePart + ',@Units, GETUTCDATE())'
            exec sp_ExecuteSQL @cmd, @parms,@Units = @UnitsToAdd, @dtOutput = @dt OUTPUT
-           select distinct name from BPAProcess P join  BPAAuditEvents A on P.processid=A.gTgtProcID 
-           where dateadd(hh,-4,eventdatetime) > @dt`);
+           select distinct P.processid,P.ProcessType,P.name, P.description, P.version,format(P.lastmodifieddate,'yyyy-MM-dd HH:mm:ss.sss') as "lastmodifieddate", P.processxml
+           from BPAProcess_devops P join  BPAAuditEvents A on P.processid=A.gTgtProcID 
+            join (select processid, max(lastmodifieddate) as lastmodifieddate
+                 from BPAProcess_devops
+                 group by processid) f2
+                 on P.processid = f2.processid and P.lastmodifieddate = f2.lastmodifieddate
+           where eventdatetime > @dt`);
     // dateadd(hh,-4,eventdatetime) here the eventdatetime have been produced and render in Zulu time
 }
 
 function RenderGetProcessListraw(result) {
     return result.recordset.reduce(function (temp, tuple) {
-        return temp + tuple.name + '\n'
+        return temp + tuple.name + ';' + tuple.lastmodifieddate + '\n'
     }, '')
 }
 
-function GetProcessInPackage(sql, argv) {
+function GetProcessInRelease(sql, argv) {
 
     return sql.query`
-    select Pck.name as "packagename",P.name as "processname"
-    from BPAPackage Pck right join BPAPackageProcess PkgP on Pck.id = PkgP.packageid right join BPAProcess P on PkgP.processid = P.processid
-    where Pck.name = ${argv.packagename}`
+        -- extract Process and object included in the release
+        select typekey, RE.name as 'entityname',P.name as 'packagename',Pro.* from BPARelease R 
+        join BPAPackage P on P.id = R.packageid 
+        join BPAReleaseEntry RE on R.id = RE.releaseid
+        join BPAProcess Pro on Pro.processid = RE.entityid
+        where R.name = ${argv.releasename} and P.name = ${argv.packagename} and RE.typekey   in ('process','object')`
 
 }
 
-function RenderGetProcessInPackagexml(result) {
+function RenderGetProcessInReleasexml(result) {
     // TO DO
 }
 
 
-function RenderGetProcessInPackageraw(result) {
+function RenderGetProcessInReleaseraw(result) {
     return result.recordset.reduce(function (temp, tuple) {
-        return temp + tuple.packagename + ";" + tuple.processname + '\n'
+        return temp + tuple.packagename + ';' + tuple.entityname + ';' + tuple.name + '\n'
     }, '')
 }
 
+function GetVariablesInRelease(sql, argv) {
+    return sql.query`
+    -- extract envrionment variable included in the release
+    select typekey, RE.name as 'entityname',Env.* from BPARelease R 
+    join BPAPackage P on P.id = R.packageid 
+    join BPAReleaseEntry RE on R.id = RE.releaseid
+    join BPAEnvironmentVar Env on Env.name = RE.entityid
+    where R.name = ${argv.releasename} and P.name = ${argv.packagename} and RE.typekey   in ('environment-variable')`
+}
 
 
 function GetProcessXml(sql, argv) {
@@ -156,14 +173,38 @@ function RenderGetProcessDetailsxml(result) {
     }, '')
 
 }
+function GetReleaseInfo(sql, argv) {
+    return sql.query`
+        select R.name as 'Releaseinfo', R.*, username, P.name as 'packagename'
+            from BPARelease R join BPAUser U on R.userid = U.userid 
+                join BPAPackage P on P.id = R.packageid
+            where R.name = ${argv.releasename} and P.name = ${argv.packagename};`
+
+}
+
+
 
 function GetReleaseDetails(sql, argv) {
+    return GetReleaseInfo(sql, argv).then(result => {
+        return GetProcessInRelease(sql, argv).then(result2 => {
+            return GetVariablesInRelease(sql, argv).then(result3 => {
+                result.recordsets.push(result2.recordsets[0])
+                result.recordsets.push(result3.recordsets[0]); return result
+            })
+        }
+
+        )
+    }
+    )
+
+}
+function GetReleaseDetails___(sql, argv) {
     return sql.query
         `
         select R.name as 'Releaseinfo', R.*, username, P.name as 'packagename'
             from BPARelease R join BPAUser U on R.userid = U.userid 
                 join BPAPackage P on P.id = R.packageid
-            where R.name = ${argv.releasename};
+            where R.name = ${argv.releasename} and P.name = ${argv.packagename};
         -- extract Process and object included in the release
         select typekey, RE.name as 'entityname',Pro.* from BPARelease R 
         join BPAPackage P on P.id = R.packageid 
@@ -250,9 +291,9 @@ function RenderGetReleaseDetailsxml(result) {
     result.recordsets.shift() // first element is the release info.
     temp += RenderGetProcessDetailsxml(result)
     result.recordsets.shift()
-    temp += RenderGetEnvironmentVarDetailsxml(result)
-    result.recordsets.shift()
-    temp += RenderGetGroupDetailsxml(result) +
+    temp += RenderGetEnvironmentVarDetailsxml(result) +
+        //result.recordsets.shift()
+        //temp += RenderGetGroupDetailsxml(result) +
         `
     </bpr:contents>
 </bpr:release>`
@@ -310,6 +351,18 @@ function ProcessCommandlineParameters(argv) {
             describe: 'Log4js Level OFF|FATAL|ERROR|WARN|INFO|DEBUG|TRACE|ALL',
             default: 'info'
         })
+
+        .command('GetReleaseInfo', '-n|--name <release name> -N | --packagename <packagename> : Provide information about a specific release', function (yargs) {
+            return yargs.option('n', {
+                alias: 'releasename',
+                describe: 'Name of the release in blueprism'
+            }).option('N', {
+                alias: 'packagename',
+                describe: 'Name of the package'
+            })
+        },
+            StandardBuilder)
+
         .command('GetProcessXml', '-n|--name <process name> : Provide the process in xml format', function (yargs) {
             return yargs.option('n', {
                 alias: 'processname',
@@ -350,13 +403,29 @@ function ProcessCommandlineParameters(argv) {
                 if (regex1.test(argv.A)) argv.regex = regex1.exec(argv.A);
                 StandardBuilder(argv)
             })
-        .command('GetProcessInPackage', '-n | --name <package name> : Provide the list of process in package <package name>', function (yargs) {
+        .command('GetProcessInRelease', '-n | --name <package name> : Provide the list of process in a specific release <package name>', function (yargs) {
             return yargs.option('n', {
+                alias: 'releasename',
+                describe: 'Provide the release name'
+            }).option('N', {
                 alias: 'packagename',
                 describe: 'Provide the package name'
             })
         },
             StandardBuilder)
+            .command('GetVariablesInRelease', '-n | --name <package name> : Provide the list of variables in a specific release <package name>', function (yargs) {
+                return yargs.option('n', {
+                    alias: 'releasename',
+                    describe: 'Provide the release name'
+                }).option('N', {
+                    alias: 'packagename',
+                    describe: 'Provide the package name'
+                })
+            },
+                StandardBuilder)
+
+
+            
         .exitProcess(true)
         .argv;
 }
