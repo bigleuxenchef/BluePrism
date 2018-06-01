@@ -182,53 +182,38 @@ function GetReleaseInfo(sql, argv) {
 
 }
 
+function GetGroupReleaseInfo(sql, argv) {
+    return sql.query`
+    -- extract process/object group included in the release
+    select typekey, RE.name as 'entityname',GP.groupid,GP.processid,GR.name from BPARelease R 
+    inner join BPAPackage P on P.id = R.packageid 
+    inner join BPAPackageProcess PP on PP.packageid = R.packageid
+    inner join BPAReleaseEntry RE on R.id = RE.releaseid
+    inner join BPAGroupProcess GP on GP.groupid = RE.entityid and GP.processid = PP.processid
+    inner join BPAGroup GR on GR.id = RE.entityid
+    where R.name = ${argv.releasename} and P.name = ${argv.packagename} and RE.typekey  in ('process-group','object-group')
+    `
 
+}
 
 function GetReleaseDetails(sql, argv) {
     return GetReleaseInfo(sql, argv).then(result => {
         return GetProcessInRelease(sql, argv).then(result2 => {
             return GetVariablesInRelease(sql, argv).then(result3 => {
-                result.recordsets.push(result2.recordsets[0])
-                result.recordsets.push(result3.recordsets[0]); return result
+                return GetGroupReleaseInfo(sql, argv).then(result4 => {
+                    result.recordsets.push(result2.recordsets[0])
+                    result.recordsets.push(result3.recordsets[0])
+                    result.recordsets.push(result4.recordsets[0])
+                    return result
+
+                })
             })
         }
 
         )
     }
     )
-
 }
-function GetReleaseDetails___(sql, argv) {
-    return sql.query
-        `
-        select R.name as 'Releaseinfo', R.*, username, P.name as 'packagename'
-            from BPARelease R join BPAUser U on R.userid = U.userid 
-                join BPAPackage P on P.id = R.packageid
-            where R.name = ${argv.releasename} and P.name = ${argv.packagename};
-        -- extract Process and object included in the release
-        select typekey, RE.name as 'entityname',Pro.* from BPARelease R 
-        join BPAPackage P on P.id = R.packageid 
-        join BPAReleaseEntry RE on R.id = RE.releaseid
-        join BPAProcess Pro on Pro.processid = RE.entityid
-        where R.name = ${argv.releasename} and P.name = ${argv.packagename} and RE.typekey   in ('process','object')
-        -- extract envrionment variable included in the release
-        select typekey, RE.name as 'entityname',Env.* from BPARelease R 
-        join BPAPackage P on P.id = R.packageid 
-        join BPAReleaseEntry RE on R.id = RE.releaseid
-        join BPAEnvironmentVar Env on Env.name = RE.entityid
-        where R.name = ${argv.releasename} and P.name = ${argv.packagename} and RE.typekey   in ('environment-variable')
-
-        -- extract process/object group included in the release
-        select typekey, RE.name as 'entityname',GP.groupid,GP.processid,GR.name from BPARelease R 
-        inner join BPAPackage P on P.id = R.packageid 
-        inner join BPAPackageProcess PP on PP.packageid = R.packageid
-        inner join BPAReleaseEntry RE on R.id = RE.releaseid
-        inner join BPAGroupProcess GP on GP.groupid = RE.entityid and GP.processid = PP.processid
-        inner join BPAGroup GR on GR.id = RE.entityid
-        where R.name = ${argv.releasename} and P.name = ${argv.packagename} and RE.typekey  in ('process-group','object-group')
-        `
-}
-
 
 function RenderGetEnvironmentVarDetailsxml(result) {
 
@@ -292,8 +277,8 @@ function RenderGetReleaseDetailsxml(result) {
     temp += RenderGetProcessDetailsxml(result)
     result.recordsets.shift()
     temp += RenderGetEnvironmentVarDetailsxml(result) +
-        //result.recordsets.shift()
-        //temp += RenderGetGroupDetailsxml(result) +
+        result.recordsets.shift()
+    temp += RenderGetGroupDetailsxml(result) +
         `
     </bpr:contents>
 </bpr:release>`
@@ -413,19 +398,31 @@ function ProcessCommandlineParameters(argv) {
             })
         },
             StandardBuilder)
-            .command('GetVariablesInRelease', '-n | --name <package name> : Provide the list of variables in a specific release <package name>', function (yargs) {
-                return yargs.option('n', {
-                    alias: 'releasename',
-                    describe: 'Provide the release name'
-                }).option('N', {
-                    alias: 'packagename',
-                    describe: 'Provide the package name'
-                })
-            },
-                StandardBuilder)
+        .command('GetGroupReleaseInfo', '-n | --name <package name> : Provide information about the groups in a specific release <package name>', function (yargs) {
+            return yargs.option('n', {
+                alias: 'releasename',
+                describe: 'Provide the release name'
+            }).option('N', {
+                alias: 'packagename',
+                describe: 'Provide the package name'
+            })
+        },
+            StandardBuilder)
 
 
-            
+        .command('GetVariablesInRelease', '-n | --name <package name> : Provide the list of variables in a specific release <package name>', function (yargs) {
+            return yargs.option('n', {
+                alias: 'releasename',
+                describe: 'Provide the release name'
+            }).option('N', {
+                alias: 'packagename',
+                describe: 'Provide the package name'
+            })
+        },
+            StandardBuilder)
+
+
+
         .exitProcess(true)
         .argv;
 }
