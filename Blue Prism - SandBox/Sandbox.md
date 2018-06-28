@@ -128,4 +128,16 @@ ALTER DATABASE BluePrismTraining set online
 
 
   
-  
+ # dnsmasq
+ ```bash
+ sudo mkdir -v /etc/resolver
+more /etc/resolver/vm
+nameserver 127.0.0.1
+nameserver 192.168.56.1
+domain vm
+ ```
+ 
+ 
+ brew install iproute2mac
+ 
+ 
